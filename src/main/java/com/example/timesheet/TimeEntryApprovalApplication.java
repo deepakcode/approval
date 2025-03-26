@@ -65,11 +65,12 @@ package com.example.timesheet.repository;
 
         import com.example.timesheet.entity.TimeEntry;
         import org.springframework.data.jpa.repository.JpaRepository;
+        import java.time.LocalDateTime;
         import java.util.List;
         import java.util.UUID;
 
 public interface TimeEntryRepository extends JpaRepository<TimeEntry, UUID> {
-    List<TimeEntry> findByWorkerIdAndDateBetween(UUID workerId, LocalDateTime startDate, LocalDateTime endDate);
+    List<TimeEntry> findByWorkerIdInAndDateBetween(List<UUID> workerIds, LocalDateTime startDate, LocalDateTime endDate);
 }
 
 // Repository for Approval
@@ -81,29 +82,6 @@ package com.example.timesheet.repository;
 
 public interface ApprovalRepository extends JpaRepository<Approval, UUID> {}
 
-// Service for Time Entry
-package com.example.timesheet.service;
-
-        import com.example.timesheet.entity.TimeEntry;
-        import com.example.timesheet.repository.TimeEntryRepository;
-        import org.springframework.stereotype.Service;
-        import java.time.LocalDateTime;
-        import java.util.List;
-        import java.util.UUID;
-
-@Service
-public class TimeEntryService {
-    private final TimeEntryRepository repository;
-
-    public TimeEntryService(TimeEntryRepository repository) {
-        this.repository = repository;
-    }
-
-    public List<TimeEntry> getTimeEntries(UUID workerId, LocalDateTime startDate, LocalDateTime endDate) {
-        return repository.findByWorkerIdAndDateBetween(workerId, startDate, endDate);
-    }
-}
-
 // Service for Approval
 package com.example.timesheet.service;
 
@@ -112,6 +90,7 @@ package com.example.timesheet.service;
         import com.example.timesheet.repository.ApprovalRepository;
         import com.example.timesheet.repository.TimeEntryRepository;
         import org.springframework.stereotype.Service;
+        import org.springframework.transaction.annotation.Transactional;
         import java.time.LocalDateTime;
         import java.util.List;
         import java.util.UUID;
@@ -126,17 +105,21 @@ public class ApprovalService {
         this.timeEntryRepository = timeEntryRepository;
     }
 
+    @Transactional
     public void approveEntries(List<UUID> workerIds, LocalDateTime startDate, LocalDateTime endDate) {
-        List<TimeEntry> entries = timeEntryRepository.findByWorkerIdAndDateBetween(workerIds.get(0), startDate, endDate);
-        for (TimeEntry entry : entries) {
-            entry.setStatus("APPROVED");
-            timeEntryRepository.save(entry);
+        List<TimeEntry> entries = timeEntryRepository.findByWorkerIdInAndDateBetween(workerIds, startDate, endDate);
+        entries.forEach(entry -> entry.setStatus("APPROVED"));
+        timeEntryRepository.saveAll(entries);
+
+        List<Approval> approvals = entries.stream().map(entry -> {
             Approval approval = new Approval();
             approval.setTimeEntryId(entry.getId());
             approval.setStatus("APPROVED");
             approval.setTimestamp(LocalDateTime.now());
-            approvalRepository.save(approval);
-        }
+            return approval;
+        }).toList();
+
+        approvalRepository.saveAll(approvals);
     }
 }
 
