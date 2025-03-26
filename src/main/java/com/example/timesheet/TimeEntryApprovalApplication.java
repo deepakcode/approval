@@ -16,12 +16,20 @@ public class TimeEntryApprovalApplication {
     }
 }
 
-// Entity for Time Entry
+// Enum for Approval States
+package com.example.timesheet.state;
+
+public enum ApprovalState {
+    PENDING, MANAGER_APPROVED, HR_APPROVED, FINANCE_APPROVED, REJECTED
+}
+
+// Entity for Time Entry with State Machine Support
 package com.example.timesheet.entity;
 
         import jakarta.persistence.*;
         import java.time.LocalDateTime;
         import java.util.UUID;
+        import com.example.timesheet.state.ApprovalState;
 
 @Entity
 @Table(name = "time_entries")
@@ -33,103 +41,96 @@ public class TimeEntry {
     private LocalDateTime date;
     private LocalDateTime clockIn;
     private LocalDateTime clockOut;
-    private String status; // PENDING, APPROVED, REJECTED
+
+    @Enumerated(EnumType.STRING)
+    private ApprovalState status; // Tracks state transitions
 
     // Getters and Setters
 }
 
-// Entity for Approval
-package com.example.timesheet.entity;
+// State Machine Configuration
+package com.example.timesheet.config;
 
-        import jakarta.persistence.*;
-        import java.time.LocalDateTime;
-        import java.util.UUID;
+        import com.example.timesheet.state.ApprovalState;
+        import org.springframework.context.annotation.Configuration;
+        import org.springframework.statemachine.config.EnableStateMachine;
+        import org.springframework.statemachine.config.StateMachineConfigurerAdapter;
+        import org.springframework.statemachine.config.builders.StateMachineConfigurationConfigurer;
+        import org.springframework.statemachine.config.builders.StateMachineStateConfigurer;
+        import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
 
-@Entity
-@Table(name = "approvals")
-public class Approval {
-    @Id
-    @GeneratedValue(strategy = GenerationType.AUTO)
-    private UUID id;
-    private UUID timeEntryId;
-    private UUID approverId;
-    private String status; // APPROVED, REJECTED
-    private String reason;
-    private LocalDateTime timestamp;
+        import java.util.EnumSet;
 
-    // Getters and Setters
+@Configuration
+@EnableStateMachine
+public class ApprovalStateMachineConfig extends StateMachineConfigurerAdapter<ApprovalState, String> {
+
+    @Override
+    public void configure(StateMachineStateConfigurer<ApprovalState, String> states) throws Exception {
+        states
+                .withStates()
+                .initial(ApprovalState.PENDING)
+                .states(EnumSet.allOf(ApprovalState.class));
+    }
+
+    @Override
+    public void configure(StateMachineTransitionConfigurer<ApprovalState, String> transitions) throws Exception {
+        transitions
+                .withExternal().source(ApprovalState.PENDING).target(ApprovalState.MANAGER_APPROVED).event("MANAGER_APPROVE")
+                .and()
+                .withExternal().source(ApprovalState.MANAGER_APPROVED).target(ApprovalState.HR_APPROVED).event("HR_APPROVE")
+                .and()
+                .withExternal().source(ApprovalState.HR_APPROVED).target(ApprovalState.FINANCE_APPROVED).event("FINANCE_APPROVE")
+                .and()
+                .withExternal().source(ApprovalState.PENDING).target(ApprovalState.REJECTED).event("REJECT");
+    }
 }
 
-// Repository for Time Entry
-package com.example.timesheet.repository;
-
-        import com.example.timesheet.entity.TimeEntry;
-        import org.springframework.data.jpa.repository.JpaRepository;
-        import java.time.LocalDateTime;
-        import java.util.List;
-        import java.util.UUID;
-
-public interface TimeEntryRepository extends JpaRepository<TimeEntry, UUID> {
-    List<TimeEntry> findByWorkerIdInAndDateBetween(List<UUID> workerIds, LocalDateTime startDate, LocalDateTime endDate);
-}
-
-// Repository for Approval
-package com.example.timesheet.repository;
-
-        import com.example.timesheet.entity.Approval;
-        import org.springframework.data.jpa.repository.JpaRepository;
-        import java.util.UUID;
-
-public interface ApprovalRepository extends JpaRepository<Approval, UUID> {}
-
-// Service for Approval
+// Service for Approval with State Transitions
 package com.example.timesheet.service;
 
-        import com.example.timesheet.entity.Approval;
         import com.example.timesheet.entity.TimeEntry;
-        import com.example.timesheet.repository.ApprovalRepository;
         import com.example.timesheet.repository.TimeEntryRepository;
+        import com.example.timesheet.state.ApprovalState;
+        import org.springframework.statemachine.StateMachine;
         import org.springframework.stereotype.Service;
         import org.springframework.transaction.annotation.Transactional;
-        import java.time.LocalDateTime;
-        import java.util.List;
+
         import java.util.UUID;
 
 @Service
 public class ApprovalService {
-    private final ApprovalRepository approvalRepository;
     private final TimeEntryRepository timeEntryRepository;
+    private final StateMachine<ApprovalState, String> stateMachine;
 
-    public ApprovalService(ApprovalRepository approvalRepository, TimeEntryRepository timeEntryRepository) {
-        this.approvalRepository = approvalRepository;
+    public ApprovalService(TimeEntryRepository timeEntryRepository, StateMachine<ApprovalState, String> stateMachine) {
         this.timeEntryRepository = timeEntryRepository;
+        this.stateMachine = stateMachine;
     }
 
     @Transactional
-    public void approveEntries(List<UUID> workerIds, LocalDateTime startDate, LocalDateTime endDate) {
-        List<TimeEntry> entries = timeEntryRepository.findByWorkerIdInAndDateBetween(workerIds, startDate, endDate);
-        entries.forEach(entry -> entry.setStatus("APPROVED"));
-        timeEntryRepository.saveAll(entries);
+    public void approve(UUID timeEntryId, String approverRole) {
+        TimeEntry entry = timeEntryRepository.findById(timeEntryId)
+                .orElseThrow(() -> new RuntimeException("Time entry not found"));
 
-        List<Approval> approvals = entries.stream().map(entry -> {
-            Approval approval = new Approval();
-            approval.setTimeEntryId(entry.getId());
-            approval.setStatus("APPROVED");
-            approval.setTimestamp(LocalDateTime.now());
-            return approval;
-        }).toList();
+        String event = switch (approverRole) {
+            case "MANAGER" -> "MANAGER_APPROVE";
+            case "HR" -> "HR_APPROVE";
+            case "FINANCE" -> "FINANCE_APPROVE";
+            default -> throw new IllegalArgumentException("Invalid approver role");
+        };
 
-        approvalRepository.saveAll(approvals);
+        stateMachine.sendEvent(event);
+        entry.setStatus(stateMachine.getState().getId());
+        timeEntryRepository.save(entry);
     }
 }
 
-// Controller for Time Entry and Approval
+// Controller for Approvals
 package com.example.timesheet.controller;
 
         import com.example.timesheet.service.ApprovalService;
         import org.springframework.web.bind.annotation.*;
-        import java.time.LocalDateTime;
-        import java.util.List;
         import java.util.UUID;
 
 @RestController
@@ -141,23 +142,8 @@ public class ApprovalController {
         this.approvalService = approvalService;
     }
 
-    @PostMapping("/bulk")
-    public void approveBulkEntries(@RequestBody BulkApprovalRequest request) {
-        approvalService.approveEntries(request.getWorkerIds(), request.getStartDate(), request.getEndDate());
+    @PostMapping("/{timeEntryId}/{role}")
+    public void approveEntry(@PathVariable UUID timeEntryId, @PathVariable String role) {
+        approvalService.approve(timeEntryId, role);
     }
-}
-
-// DTO for Bulk Approval
-package com.example.timesheet.dto;
-
-        import java.time.LocalDateTime;
-        import java.util.List;
-        import java.util.UUID;
-
-public class BulkApprovalRequest {
-    private List<UUID> workerIds;
-    private LocalDateTime startDate;
-    private LocalDateTime endDate;
-
-    // Getters and Setters
 }
