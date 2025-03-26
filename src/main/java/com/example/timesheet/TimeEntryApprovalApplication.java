@@ -1,98 +1,94 @@
 package com.company.approvalsystem;
 
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.stereotype.Service;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.ResponseEntity;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.statemachine.StateMachine;
+import org.springframework.statemachine.config.EnableStateMachine;
+import org.springframework.statemachine.config.StateMachineConfigurerAdapter;
+import org.springframework.statemachine.config.builders.StateMachineStateConfigurer;
+import org.springframework.statemachine.config.builders.StateMachineTransitionConfigurer;
+import org.springframework.web.bind.annotation.*;
+import java.util.EnumSet;
 import java.util.UUID;
-import java.util.Optional;
-import java.util.HashMap;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/approvals")
 public class ApprovalController {
 
-    private final ApprovalService approvalService;
+    private final StateMachine<ApprovalState, ApprovalEvent> stateMachine;
 
     @Autowired
-    public ApprovalController(ApprovalService approvalService) {
-        this.approvalService = approvalService;
+    public ApprovalController(StateMachine<ApprovalState, ApprovalEvent> stateMachine) {
+        this.stateMachine = stateMachine;
     }
 
     @PostMapping("/{id}/approve")
     public ResponseEntity<String> approve(@PathVariable UUID id) {
-        approvalService.approve(id);
+        sendEvent(ApprovalEvent.APPROVE);
         return ResponseEntity.ok("Time entry approved");
     }
 
     @PostMapping("/{id}/reject")
     public ResponseEntity<String> reject(@PathVariable UUID id, @RequestBody RejectRequest request) {
-        approvalService.reject(id, request.getReason());
+        sendEvent(ApprovalEvent.REJECT);
         return ResponseEntity.ok("Time entry rejected");
     }
 
     @PostMapping("/{id}/delegate")
     public ResponseEntity<String> delegateApproval(@PathVariable UUID id, @RequestBody DelegateRequest request) {
-        approvalService.delegate(id, request.getDelegateTo());
+        sendEvent(ApprovalEvent.DELEGATE);
         return ResponseEntity.ok("Approval delegated");
     }
 
     @PostMapping("/{id}/escalate")
     public ResponseEntity<String> escalateApproval(@PathVariable UUID id, @RequestBody EscalateRequest request) {
-        approvalService.escalate(id, request.getEscalateTo());
+        sendEvent(ApprovalEvent.ESCALATE);
         return ResponseEntity.ok("Approval escalated");
     }
-}
 
-@Service
-class ApprovalService {
-    private final Map<UUID, Approval> approvalDatabase = new HashMap<>();
-
-    public void approve(UUID id) {
-        Approval approval = getApproval(id);
-        approval.setStatus("Approved");
-    }
-
-    public void reject(UUID id, String reason) {
-        Approval approval = getApproval(id);
-        approval.setStatus("Rejected");
-        approval.setReason(reason);
-    }
-
-    public void delegate(UUID id, UUID delegateTo) {
-        Approval approval = getApproval(id);
-        approval.setDelegatedTo(delegateTo);
-        approval.setStatus("Delegated");
-    }
-
-    public void escalate(UUID id, UUID escalateTo) {
-        Approval approval = getApproval(id);
-        approval.setEscalatedTo(escalateTo);
-        approval.setStatus("Escalated");
-    }
-
-    private Approval getApproval(UUID id) {
-        return approvalDatabase.computeIfAbsent(id, k -> new Approval(id));
+    private void sendEvent(ApprovalEvent event) {
+        Message<ApprovalEvent> message = MessageBuilder.withPayload(event).build();
+        stateMachine.sendEvent(message);
     }
 }
 
-class Approval {
-    private UUID id;
-    private String status;
-    private String reason;
-    private UUID delegatedTo;
-    private UUID escalatedTo;
+@Configuration
+@EnableStateMachine
+class ApprovalStateMachine extends StateMachineConfigurerAdapter<ApprovalState, ApprovalEvent> {
 
-    public Approval(UUID id) {
-        this.id = id;
-        this.status = "Pending";
+    @Override
+    public void configure(StateMachineStateConfigurer<ApprovalState, ApprovalEvent> states) throws Exception {
+        states
+                .withStates()
+                .initial(ApprovalState.PENDING)
+                .states(EnumSet.of(ApprovalState.PENDING, ApprovalState.SUBMITTED, ApprovalState.APPROVED,
+                        ApprovalState.REJECTED, ApprovalState.DELEGATED, ApprovalState.ESCALATED));
     }
 
-    public void setStatus(String status) { this.status = status; }
-    public void setReason(String reason) { this.reason = reason; }
-    public void setDelegatedTo(UUID delegatedTo) { this.delegatedTo = delegatedTo; }
-    public void setEscalatedTo(UUID escalatedTo) { this.escalatedTo = escalatedTo; }
+    @Override
+    public void configure(StateMachineTransitionConfigurer<ApprovalState, ApprovalEvent> transitions) throws Exception {
+        transitions
+                .withExternal().source(ApprovalState.PENDING).target(ApprovalState.SUBMITTED).event(ApprovalEvent.SUBMIT)
+                .and()
+                .withExternal().source(ApprovalState.SUBMITTED).target(ApprovalState.APPROVED).event(ApprovalEvent.APPROVE)
+                .and()
+                .withExternal().source(ApprovalState.SUBMITTED).target(ApprovalState.REJECTED).event(ApprovalEvent.REJECT)
+                .and()
+                .withExternal().source(ApprovalState.SUBMITTED).target(ApprovalState.DELEGATED).event(ApprovalEvent.DELEGATE)
+                .and()
+                .withExternal().source(ApprovalState.SUBMITTED).target(ApprovalState.ESCALATED).event(ApprovalEvent.ESCALATE);
+    }
+}
+
+enum ApprovalState {
+    PENDING, SUBMITTED, APPROVED, REJECTED, DELEGATED, ESCALATED;
+}
+
+enum ApprovalEvent {
+    SUBMIT, APPROVE, REJECT, DELEGATE, ESCALATE;
 }
 
 class RejectRequest {
